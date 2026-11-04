@@ -1,7 +1,12 @@
 package com.pinclip.app
 
 import android.accessibilityservice.AccessibilityService
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.provider.Settings
 import android.os.Build
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
@@ -14,6 +19,27 @@ class PasteService : AccessibilityService() {
         @Volatile private var inst: PasteService? = null
         fun running() = inst != null
         fun paste(text: String?): Boolean = inst?.doPaste(text) ?: false
+
+        /**
+         * If WRITE_SECURE_SETTINGS was granted once through adb, this silently re-enables
+         * the accessibility service whenever Android or a "cleaner" app switches it off.
+         */
+        fun ensure(ctx: Context) {
+            try {
+                if (ctx.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) != PackageManager.PERMISSION_GRANTED) return
+                val me = ComponentName(ctx, PasteService::class.java)
+                val cr = ctx.contentResolver
+                val cur = Settings.Secure.getString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+                val list = cur.split(":").filter { it.isNotEmpty() }
+                if (list.none { ComponentName.unflattenFromString(it) == me }) {
+                    Settings.Secure.putString(cr, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, (list + me.flattenToString()).joinToString(":"))
+                }
+                if (Settings.Secure.getInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 0) != 1) {
+                    Settings.Secure.putInt(cr, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                }
+            } catch (e: Exception) {
+            }
+        }
     }
 
     override fun onServiceConnected() { inst = this }

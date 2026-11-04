@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -137,6 +138,7 @@ object Store {
             main.post {
                 items.add(Item(id, "", name, group, false, 0, System.currentTimeMillis()))
                 save(); notifyChange()
+                Toast.makeText(app, "Saved to PinClip", Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
         }

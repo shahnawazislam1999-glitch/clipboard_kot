@@ -3,12 +3,16 @@ package com.pinclip.app
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -26,6 +30,10 @@ class MainActivity : Activity() {
     private lateinit var a11yStatus: TextView
     private lateinit var stats: TextView
     private lateinit var seek: SeekBar
+    private lateinit var autoStatus: TextView
+    private lateinit var seek2: SeekBar
+    private lateinit var palphaLabel: TextView
+    private lateinit var keepStatus: TextView
     private var sup = false
 
     override fun onCreate(b: Bundle?) {
@@ -38,6 +46,10 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        PasteService.ensure(this)
+        if (Store.prefs.getBoolean("bubble", false) && Settings.canDrawOverlays(this)) {
+            try { startForegroundService(Intent(this, FloatingService::class.java)) } catch (e: Exception) {}
+        }
         refresh()
     }
 
@@ -117,11 +129,29 @@ class MainActivity : Activity() {
             LP(MATCH, WRAP).apply { topMargin = dp(12) }
         )
 
+        // window opacity
+        palphaLabel = label("", 14f)
+        seek2 = SeekBar(this)
+        seek2.max = 100
+        seek2.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                palphaLabel.text = "Window opacity: $p%"
+                if (fromUser) Store.prefs.edit().putInt("palpha", p).apply()
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        root.addView(
+            card("Window transparency", "Make the open clipboard window see-through so you can read the app behind it (minimum 15%). It turns solid while you type.", palphaLabel, seek2),
+            LP(MATCH, WRAP).apply { topMargin = dp(12) }
+        )
+
         // auto detect
         autoSw = Switch(this)
+        autoStatus = label("", 12f, C.SUB)
         autoSw.setOnCheckedChangeListener { _, on -> if (!sup) onAuto(on) }
         root.addView(
-            card("Auto detect", "Saves everything you copy (text and images) and every screenshot as a card. Needs photo access for screenshots.", switchRow("Auto save copies & screenshots", autoSw)),
+            card("Auto detect", "Saves everything you copy (text and images) and every screenshot as a card. Needs photo access for screenshots.", switchRow("Auto save copies & screenshots", autoSw), autoStatus),
             LP(MATCH, WRAP).apply { topMargin = dp(12) }
         )
 
@@ -134,6 +164,40 @@ class MainActivity : Activity() {
                 "Instant paste",
                 "Enable PinClip under Installed apps so tapping a card pastes straight into the field you are typing in. Without it the card is only copied. If the switch is greyed out: App info → ⋮ → Allow restricted settings.",
                 a11yStatus, openA11y
+            ),
+            LP(MATCH, WRAP).apply { topMargin = dp(12) }
+        )
+
+        // keep alive
+        keepStatus = label("", 13f, C.SUB)
+        val bat = pill("Battery: set Unrestricted", C.ACCENT, android.graphics.Color.WHITE)
+        bat.setOnClickListener {
+            try {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            } catch (e: Exception) {
+                try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) } catch (e2: Exception) {}
+            }
+        }
+        val auto = pill("Autostart / background settings", C.CARD2)
+        auto.setOnClickListener { openAutostart() }
+        val info = pill("App info", C.CARD2)
+        info.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
+        val cmd = "adb shell pm grant $packageName android.permission.WRITE_SECURE_SETTINGS"
+        val cmdCopy = pill("Copy adb command (auto-keep Accessibility on)", C.CARD2, C.AMBER)
+        cmdCopy.setOnClickListener {
+            (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("adb", cmd))
+            Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+        }
+        val kcol = LinearLayout(this)
+        kcol.orientation = LinearLayout.VERTICAL
+        for (v in listOf<View>(bat, auto, info, cmdCopy)) kcol.addView(v, LP(WRAP, WRAP).apply { topMargin = dp(6) })
+        root.addView(
+            card(
+                "Keep running",
+                "The bubble runs as a protected service, restarts itself after a swipe from recents, a reboot or an app update. In your phone's recents screen also lock PinClip (long-press its card → Lock). Autostart must be allowed on Xiaomi, Oppo, Vivo, Huawei.",
+                keepStatus, kcol
             ),
             LP(MATCH, WRAP).apply { topMargin = dp(12) }
         )
@@ -172,6 +236,7 @@ class MainActivity : Activity() {
                 "• Use {date} and {time} in a card; they turn into today's date/time when pasted.\n" +
                 "• Long-press a group chip to rename or delete it.\n" +
                 "• Search + 'Top used' chip find your most reused snippets fast.\n" +
+                "• Drag the window by its title bar; drag the grip at the bottom-right corner to resize. Position and size are remembered.\n" +
                 "• The ▾ button at the top of the panel shrinks it back to the bubble.",
             12f, C.SUB
         )
@@ -189,11 +254,39 @@ class MainActivity : Activity() {
         val a = Store.prefs.getInt("alpha", 10)
         seek.progress = a
         alphaLabel.text = "Bubble opacity: $a%"
+        val pa = Store.prefs.getInt("palpha", 100)
+        seek2.progress = pa
+        palphaLabel.text = "Window opacity: $pa%"
         sup = false
         val on = a11yOn()
+        val mp = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
+        val photos = checkSelfPermission(mp) == PackageManager.PERMISSION_GRANTED
+        autoStatus.text = "Text copies: " + (if (autoSw.isChecked) "✓ on" else "✗ switch is off") +
+            "\nScreenshots: " + (if (photos) "✓ photo access granted" else "✗ photo access missing – turn the switch off and on again and tap Allow")
+        val ign = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        val sec = checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED
+        keepStatus.text = (if (ign) "✓ Battery unrestricted" else "✗ Battery optimisation still on") + "\n" +
+            (if (sec) "✓ Accessibility is kept on automatically" else "Optional: run the adb command once so Accessibility can never switch off")
         a11yStatus.text = if (on) "✓ Instant paste is on" else "Not enabled yet"
         a11yStatus.setTextColor(if (on) C.AMBER else C.SUB)
         stats.text = "${Store.items.size} cards · ${Store.groups.size} groups · ${Store.items.count { it.pinned }} pinned"
+    }
+
+    private fun openAutostart() {
+        val list = listOf(
+            "com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity",
+            "com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+            "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+            "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+        )
+        for ((pkg, cls) in list) {
+            try {
+                startActivity(Intent().setComponent(ComponentName(pkg, cls)))
+                return
+            } catch (e: Exception) {
+            }
+        }
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
 
     private fun a11yOn(): Boolean {

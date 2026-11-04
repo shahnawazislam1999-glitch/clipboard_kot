@@ -14,8 +14,22 @@ android {
         versionCode = 1
         versionName = "1.0"
     }
+    // One fixed key so every GitHub build is signed the same -> APK updates install over the old one
+    // and Android keeps the Accessibility permission enabled.
+    signingConfigs {
+        create("fixed") {
+            storeFile = file("pinclip.keystore")
+            storePassword = "pinclip123"
+            keyAlias = "pinclip"
+            keyPassword = "pinclip123"
+        }
+    }
     buildTypes {
-        release { isMinifyEnabled = false }
+        getByName("debug") { signingConfig = signingConfigs.getByName("fixed") }
+        getByName("release") {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("fixed")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

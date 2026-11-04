@@ -1,6 +1,7 @@
 package com.pinclip.app
 
 import android.Manifest
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -83,20 +84,17 @@ class FloatingService : Service() {
     private val seps = listOf("New line" to "\n", "Space" to " ", "Comma" to ", ")
 
     private val prefL = SharedPreferences.OnSharedPreferenceChangeListener { _, k ->
-        if (k == "alpha") applyAlpha() else if (k == "auto") applyAuto()
+        if (k == "alpha") applyAlpha() else if (k == "palpha") applyPanelAlpha() else if (k == "auto") applyAuto()
     }
     private val clipL = ClipboardManager.OnPrimaryClipChangedListener { onClip() }
-    private val clipRun = Runnable {
-        try {
-            startActivity(
-                Intent(this, ClipReadActivity::class.java).addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-                )
-            )
-        } catch (e: Exception) {
+    private val clipRun = Runnable { readClip() }
+    private val shotRun = Runnable { Thread { checkShot() }.start() }
+    private val keepRun = object : Runnable {
+        override fun run() {
+            PasteService.ensure(this@FloatingService)
+            h.postDelayed(this, 30000)
         }
     }
-    private val shotRun = Runnable { Thread { checkShot() }.start() }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -111,6 +109,26 @@ class FloatingService : Service() {
         Store.onChange = { if (panel != null) renderList() }
         if (Settings.canDrawOverlays(this)) addBubble()
         applyAuto()
+        h.post(keepRun)
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        scheduleRestart()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    /** If the system or the user swipes us away while the bubble should be on, come back. */
+    private fun scheduleRestart() {
+        if (!Store.prefs.getBoolean("bubble", false)) return
+        try {
+            val pi = PendingIntent.getForegroundService(
+                this, 2, Intent(this, FloatingService::class.java),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            (getSystemService(ALARM_SERVICE) as AlarmManager)
+                .set(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 1500, pi)
+        } catch (e: Exception) {
+        }
     }
 
     override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
@@ -125,6 +143,7 @@ class FloatingService : Service() {
     }
 
     override fun onDestroy() {
+        scheduleRestart()
         Store.prefs.unregisterOnSharedPreferenceChangeListener(prefL)
         if (autoOn) {
             cm.removePrimaryClipChangedListener(clipL)
@@ -262,6 +281,18 @@ class FloatingService : Service() {
         else lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         lp.height = if (on) shortH else fullH
         try { wm.updateViewLayout(p, lp) } catch (e: Exception) {}
+        if (on) p.alpha = 1f else applyPanelAlpha()
+    }
+
+    private fun applyPanelAlpha() {
+        val p = panel ?: return
+        if (editorOpen) { p.alpha = 1f; return }
+        p.alpha = (Store.prefs.getInt("palpha", 100).coerceIn(0, 100) / 100f).coerceAtLeast(0.15f)
+    }
+
+    private fun savePanelGeometry() {
+        val lp = panelLp ?: return
+        Store.prefs.edit().putInt("px", lp.x).putInt("py", lp.y).putInt("pw", lp.width).putInt("ph", fullH).apply()
     }
 
     private fun hideKb() {
@@ -281,9 +312,11 @@ class FloatingService : Service() {
 
     private fun buildPanel() {
         val dm = resources.displayMetrics
-        val w = minOf(dp(340), dm.widthPixels - dp(16))
-        fullH = (dm.heightPixels * 0.62f).toInt()
-        shortH = (dm.heightPixels * 0.42f).toInt()
+        val sw = dm.widthPixels
+        val sh = dm.heightPixels
+        val w = Store.prefs.getInt("pw", minOf(dp(340), sw - dp(16))).coerceIn(dp(200), sw)
+        fullH = Store.prefs.getInt("ph", (sh * 0.62f).toInt()).coerceIn(dp(220), sh)
+        shortH = minOf(fullH, (sh * 0.42f).toInt())
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
@@ -373,19 +406,53 @@ class FloatingService : Service() {
         multiBar = mb
         root.addView(mb, LP(MATCH, WRAP).apply { topMargin = dp(8) })
 
+        // resize grip (bottom-right): drag to make the window bigger or smaller
+        val gripRow = LinearLayout(this)
+        gripRow.gravity = Gravity.END
+        val grip = iconView(R.drawable.ic_resize, C.SUB, 18, 5)
+        gripRow.addView(grip)
+        root.addView(gripRow, LP(MATCH, WRAP))
+        attachResize(grip)
+
         val lp = overlayLp(w, fullH)
         lp.gravity = Gravity.TOP or Gravity.START
-        lp.x = (dm.widthPixels - w) / 2
-        lp.y = dp(60)
+        lp.x = Store.prefs.getInt("px", (sw - w) / 2).coerceIn(0, maxOf(0, sw - w))
+        lp.y = Store.prefs.getInt("py", dp(60)).coerceIn(0, maxOf(0, sh - dp(120)))
         lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         panel = root
         panelLp = lp
         wm.addView(root, lp)
-        attachDrag(head, { panel }, { panelLp }, null, null)
+        attachDrag(head, { panel }, { panelLp }, null) { savePanelGeometry() }
+        applyPanelAlpha()
 
         renderChips()
         renderList()
         updateMultiBar()
+    }
+
+    private fun attachResize(grip: View) {
+        var sw0 = 0
+        var sh0 = 0
+        var tx = 0f
+        var ty = 0f
+        grip.setOnTouchListener { _, e ->
+            val lp = panelLp
+            val p = panel
+            if (lp == null || p == null) return@setOnTouchListener false
+            val dm = resources.displayMetrics
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> { sw0 = lp.width; sh0 = lp.height; tx = e.rawX; ty = e.rawY }
+                MotionEvent.ACTION_MOVE -> {
+                    lp.width = (sw0 + (e.rawX - tx)).toInt().coerceIn(dp(200), maxOf(dp(200), dm.widthPixels - lp.x))
+                    lp.height = (sh0 + (e.rawY - ty)).toInt().coerceIn(dp(220), maxOf(dp(220), dm.heightPixels - lp.y))
+                    fullH = lp.height
+                    shortH = minOf(fullH, (dm.heightPixels * 0.42f).toInt())
+                    try { wm.updateViewLayout(p, lp) } catch (ex: Exception) {}
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> savePanelGeometry()
+            }
+            true
+        }
     }
 
     private fun renderChips() {
@@ -716,6 +783,48 @@ class FloatingService : Service() {
         }
     }
 
+    private fun launchReader() {
+        try {
+            startActivity(
+                Intent(this, ClipReadActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                )
+            )
+        } catch (e: Exception) {
+        }
+    }
+
+    /**
+     * Android lets only the window that has focus read the clipboard. We add a 1px focusable
+     * overlay for a moment (works without any "background pop-up" permission), read the clip,
+     * and fall back to the invisible activity if that fails.
+     */
+    private fun readClip() {
+        if (!Settings.canDrawOverlays(this)) { launchReader(); return }
+        val v = View(this)
+        val lp = WindowManager.LayoutParams(
+            1, 1, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        )
+        lp.gravity = Gravity.TOP or Gravity.START
+        var finished = false
+        fun finish(ok: Boolean) {
+            if (finished) return
+            finished = true
+            try { wm.removeView(v) } catch (e: Exception) {}
+            if (!ok) launchReader()
+        }
+        v.viewTreeObserver.addOnWindowFocusChangeListener { has ->
+            if (has && !finished) {
+                val ok = try { ClipReader.read(this) } catch (e: Exception) { false }
+                finish(ok)
+            }
+        }
+        try { wm.addView(v, lp) } catch (e: Exception) { launchReader(); return }
+        h.postDelayed({ finish(false) }, 800)
+    }
+
     private fun onClip() {
         if (SystemClock.elapsedRealtime() < Store.ignoreClipUntil) return
         h.removeCallbacks(clipRun)
@@ -735,7 +844,8 @@ class FloatingService : Service() {
             val proj = arrayOf(
                 MediaStore.Images.Media._ID,
                 MediaStore.Images.Media.DISPLAY_NAME,
-                MediaStore.Images.Media.DATA
+                MediaStore.Images.Media.DATA,
+                MediaStore.Images.Media.BUCKET_DISPLAY_NAME
             )
             val since = System.currentTimeMillis() / 1000 - 20
             contentResolver.query(
@@ -746,7 +856,9 @@ class FloatingService : Service() {
                     val id = c.getLong(0)
                     val name = c.getString(1) ?: ""
                     val path = c.getString(2) ?: ""
-                    if (!(name.contains("screenshot", true) || path.contains("screenshot", true))) continue
+                    val bucket = c.getString(3) ?: ""
+                    if (!(name.contains("screenshot", true) || path.contains("screenshot", true) ||
+                            bucket.contains("screenshot", true))) continue
                     val fresh = synchronized(seen) { seen.add(id) }
                     if (fresh) Store.addImage(ContentUris.withAppendedId(base, id))
                 }

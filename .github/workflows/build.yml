@@ -3,9 +3,15 @@ on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -21,3 +27,9 @@ jobs:
         with:
           name: PinClip-debug-apk
           path: app/build/outputs/apk/debug/*.apk
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.${{ github.run_number }}
+          name: PinClip build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/*.apk
