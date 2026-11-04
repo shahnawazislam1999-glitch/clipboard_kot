@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PinClip</string>
+    <string name="a11y_desc">Lets PinClip paste a tapped clipboard card straight into the text field you are typing in. It never reads or stores what is on your screen.</string>
+</resources>
