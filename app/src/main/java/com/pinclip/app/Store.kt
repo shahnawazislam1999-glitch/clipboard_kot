@@ -215,6 +215,19 @@ object Store {
         save(); notifyChange()
     }
 
+    @Volatile var lastClip = ""
+
+    /** Short rolling log shown on the home screen so you can see what auto-detect is doing. */
+    fun log(msg: String) {
+        try {
+            val t = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+            val old = prefs.getString("log", "") ?: ""
+            val lines = (old.split("\n").filter { it.isNotEmpty() } + "$t $msg").takeLast(6)
+            prefs.edit().putString("log", lines.joinToString("\n")).apply()
+        } catch (e: Exception) {
+        }
+    }
+
     fun exportText(): String =
         items.filter { it.image == null }.joinToString("\n\n-----\n\n") { it.text }
 

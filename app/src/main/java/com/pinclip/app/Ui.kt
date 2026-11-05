@@ -51,11 +51,12 @@ fun Context.label(t: String, sp: Float = 14f, color: Int = C.TEXT): TextView {
     return v
 }
 
-fun Context.pill(t: String, bg: Int, fg: Int = C.TEXT): TextView {
-    val v = label(t, 13f, fg)
-    v.setPadding(dp(12), dp(7), dp(12), dp(7))
-    v.background = rounded(bg, 16)
+fun Context.pill(t: String, bg: Int, fg: Int = C.TEXT, small: Boolean = false): TextView {
+    val v = label(t, if (small) 11f else 13f, fg)
+    if (small) v.setPadding(dp(9), dp(4), dp(9), dp(4)) else v.setPadding(dp(12), dp(7), dp(12), dp(7))
+    v.background = rounded(bg, if (small) 12 else 16)
     v.gravity = Gravity.CENTER
+    v.maxLines = 1
     return v
 }
 

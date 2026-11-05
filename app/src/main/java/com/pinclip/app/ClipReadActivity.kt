@@ -11,21 +11,35 @@ object ClipReader {
     fun read(ctx: Context): Boolean {
         Store.init(ctx)
         val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        val clip = cm.primaryClip ?: return false
-        if (clip.itemCount == 0) return false
+        val clip = cm.primaryClip
+        if (clip == null || clip.itemCount == 0) {
+            Store.log("clipboard looked empty (blocked or nothing copied)")
+            return false
+        }
         val desc = clip.description
-        if (Build.VERSION.SDK_INT >= 33 && desc.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) return true
+        if (Build.VERSION.SDK_INT >= 33 && desc.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) {
+            Store.log("skipped a sensitive copy (password)")
+            return true
+        }
         val item = clip.getItemAt(0)
         val uri = item.uri
         if (uri != null) {
             val type = ctx.contentResolver.getType(uri) ?: ""
             if (desc.hasMimeType("image/*") || type.startsWith("image/")) {
+                Store.log("saving copied image")
                 Store.addImage(uri)
                 return true
             }
         }
         val t = item.coerceToText(ctx)?.toString() ?: return false
-        if (Store.addText(t)) Toast.makeText(ctx, "Saved to PinClip", Toast.LENGTH_SHORT).show()
+        if (t == Store.lastClip) {
+            Store.log("same text as last capture")
+            return true
+        }
+        Store.lastClip = t
+        val added = Store.addText(t)
+        Store.log(if (added) "saved text (" + t.length + " chars)" else "text already saved - moved to top")
+        Toast.makeText(ctx, if (added) "Saved to PinClip" else "Already in PinClip", Toast.LENGTH_SHORT).show()
         return true
     }
 }
@@ -38,7 +52,8 @@ class ClipReadActivity : Activity() {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus && !done) {
             done = true
-            try { ClipReader.read(this) } catch (e: Exception) {}
+            val ok = try { ClipReader.read(this) } catch (e: Exception) { false }
+            Store.log(if (ok) "activity read ok" else "activity read failed")
             finish()
             overridePendingTransition(0, 0)
         }

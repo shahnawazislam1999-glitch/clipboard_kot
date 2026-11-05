@@ -289,6 +289,8 @@ class MainActivity : Activity() {
         val sec = checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED
         keepStatus.text = (if (ign) "✓ Battery unrestricted" else "✗ Battery optimisation still on") + "\n" +
             (if (sec) "✓ Accessibility is kept on automatically" else "Optional: run the adb command once so Accessibility can never switch off")
+        autoStatus.text = autoStatus.text.toString() + "\nAccessibility: " + (if (on) "✓ on" else "✗ OFF – turn it on to catch every copy") +
+            "\n\nRecent activity:\n" + (Store.prefs.getString("log", "") ?: "").ifEmpty { "(nothing yet)" }
         a11yStatus.text = if (on) "✓ Instant paste is on" else "Not enabled yet"
         a11yStatus.setTextColor(if (on) C.AMBER else C.SUB)
         stats.text = "${Store.items.size} cards · ${Store.groups.size} groups · ${Store.items.count { it.pinned }} pinned"

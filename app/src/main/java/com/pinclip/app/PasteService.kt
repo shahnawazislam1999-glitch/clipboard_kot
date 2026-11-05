@@ -18,6 +18,10 @@ class PasteService : AccessibilityService() {
     companion object {
         @Volatile private var inst: PasteService? = null
         fun running() = inst != null
+        fun instance(): PasteService? = inst
+        @Volatile var onCopyHint: (() -> Unit)? = null
+        private val copyWords = setOf("copy", "copied", "cut", "copiar", "cortar", "copia", "copier", "kopieren")
+        private val copyMarks = listOf("复制", "複製", "コピー", "복사", "कॉपी", "نسخ", "копир")
         fun paste(text: String?): Boolean = inst?.doPaste(text) ?: false
 
         /**
@@ -49,7 +53,23 @@ class PasteService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+    /** Notices the "Copy" button / the system copy preview so the clipboard can be read right away. */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null) return
+        val pkg = event.packageName?.toString() ?: ""
+        if (pkg == packageName) return
+        val sb = StringBuilder()
+        event.text?.forEach { sb.append(it).append(' ') }
+        event.contentDescription?.let { sb.append(it) }
+        val t = sb.toString().lowercase()
+        val cls = event.className?.toString()?.lowercase() ?: ""
+        var hit = false
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            hit = t.split(Regex("[^\\p{L}]+")).any { copyWords.contains(it) } || copyMarks.any { t.contains(it) }
+        }
+        if (!hit && pkg == "com.android.systemui" && (cls.contains("clip") || t.contains("clip") || t.contains("copied"))) hit = true
+        if (hit) onCopyHint?.invoke()
+    }
     override fun onInterrupt() {}
 
     private fun doPaste(text: String?): Boolean {
