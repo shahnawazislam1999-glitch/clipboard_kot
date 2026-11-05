@@ -13,6 +13,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -224,18 +227,37 @@ class MainActivity : Activity() {
         btns.orientation = LinearLayout.HORIZONTAL
         btns.addView(exp, LP(WRAP, WRAP).apply { rightMargin = dp(8) })
         btns.addView(clr)
+
+        val bk = pill("Backup (export)", C.ACCENT, android.graphics.Color.WHITE)
+        bk.setOnClickListener { doBackup() }
+        val rs = pill("Restore (import)", C.CARD2)
+        rs.setOnClickListener { doRestore() }
+        val b2 = LinearLayout(this)
+        b2.orientation = LinearLayout.HORIZONTAL
+        b2.addView(bk, LP(WRAP, WRAP).apply { rightMargin = dp(8) })
+        b2.addView(rs)
+        val addImg = pill("Add images", C.CARD2, C.ACCENT)
+        addImg.setOnClickListener { startActivity(Intent(this, ImagePickActivity::class.java)) }
+        val b3 = LinearLayout(this)
+        b3.orientation = LinearLayout.HORIZONTAL
+        b3.addView(addImg)
+        b2.layoutParams = LP(MATCH, WRAP).apply { topMargin = dp(8) }
+        b3.layoutParams = LP(MATCH, WRAP).apply { topMargin = dp(8) }
         root.addView(
-            card("Library", null, stats, btns),
+            card("Library", "Backup saves all cards, groups and images into one .zip file you can restore on any phone.", stats, btns, b2, b3),
             LP(MATCH, WRAP).apply { topMargin = dp(12) }
         )
 
         // tips
         val tips = label(
-            "• Tap a card → paste. Long-press a card → multi-select, then paste them together.\n" +
+            "• Image cards work like text cards: add them with the picture button, add a caption, group, pin or paste them.\n" +
+                "• Tap a card → paste. Long-press a card → multi-select, then paste them together.\n" +
                 "• Cards: pin on the left; edit, copy and delete on the right.\n" +
                 "• Use {date} and {time} in a card; they turn into today's date/time when pasted.\n" +
                 "• Long-press a group chip to rename or delete it.\n" +
                 "• Search + 'Top used' chip find your most reused snippets fast.\n" +
+                "• Notification: tap it (or its Open button) to show the clipboard window even when the bubble is hidden; Hide/Show bubble toggles the bubble.\n" +
+                "• ⇕ icon = reading mode (full text). Select mode → Select all → Move to group or Delete. Paste all pastes the whole current view, oldest first.\n" +
                 "• Drag the window by its title bar; drag the grip at the bottom-right corner to resize. Position and size are remembered.\n" +
                 "• The ▾ button at the top of the panel shrinks it back to the bubble.",
             12f, C.SUB
@@ -270,6 +292,64 @@ class MainActivity : Activity() {
         a11yStatus.text = if (on) "✓ Instant paste is on" else "Not enabled yet"
         a11yStatus.setTextColor(if (on) C.AMBER else C.SUB)
         stats.text = "${Store.items.size} cards · ${Store.groups.size} groups · ${Store.items.count { it.pinned }} pinned"
+    }
+
+    private fun doBackup() {
+        val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
+        i.addCategory(Intent.CATEGORY_OPENABLE)
+        i.type = "application/zip"
+        i.putExtra(Intent.EXTRA_TITLE, "PinClip-backup-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.getDefault()).format(Date()) + ".zip")
+        startActivityForResult(i, 10)
+    }
+
+    private fun doRestore() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        i.addCategory(Intent.CATEGORY_OPENABLE)
+        i.type = "*/*"
+        startActivityForResult(i, 11)
+    }
+
+    override fun onActivityResult(rc: Int, res: Int, data: Intent?) {
+        super.onActivityResult(rc, res, data)
+        val uri = data?.data
+        if (res != RESULT_OK || uri == null) return
+        if (rc == 10) {
+            val js = Store.backupJson()
+            val imgs = Store.backupImages()
+            Thread {
+                val ok = try {
+                    contentResolver.openOutputStream(uri)?.use { Store.writeZip(it, js, imgs) }
+                    true
+                } catch (e: Exception) {
+                    false
+                }
+                runOnUiThread {
+                    Toast.makeText(this, if (ok) "Backup saved (${imgs.size} images)" else "Backup failed", Toast.LENGTH_LONG).show()
+                }
+            }.start()
+        } else if (rc == 11) {
+            AlertDialog.Builder(this)
+                .setTitle("Restore backup")
+                .setMessage("Merge adds missing cards and keeps what you have. Replace wipes everything first.")
+                .setPositiveButton("Merge") { _, _ -> runImport(uri, false) }
+                .setNegativeButton("Replace all") { _, _ -> runImport(uri, true) }
+                .setNeutralButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun runImport(uri: Uri, replace: Boolean) {
+        Thread {
+            val ins = try { contentResolver.openInputStream(uri) } catch (e: Exception) { null }
+            if (ins == null) {
+                runOnUiThread { Toast.makeText(this, "Could not open that file", Toast.LENGTH_LONG).show() }
+            } else {
+                Store.importZip(ins, replace) { n ->
+                    Toast.makeText(this, if (n >= 0) "Restored $n cards" else "Not a valid PinClip backup", Toast.LENGTH_LONG).show()
+                    refresh()
+                }
+            }
+        }.start()
     }
 
     private fun openAutostart() {

@@ -52,6 +52,8 @@ class FloatingService : Service() {
 
     companion object {
         const val STOP = "com.pinclip.app.STOP"
+        const val OPEN = "com.pinclip.app.OPEN"
+        const val TOGGLE = "com.pinclip.app.TOGGLE"
         const val CH = "pinclip"
     }
 
@@ -66,6 +68,8 @@ class FloatingService : Service() {
     private var body: FrameLayout? = null
     private var multiBar: LinearLayout? = null
     private var chipRow: LinearLayout? = null
+    private var actionRow: LinearLayout? = null
+    private var confirmBulk = false
     private var searchBox: EditText? = null
     private var fullH = 0
     private var shortH = 0
@@ -139,6 +143,14 @@ class FloatingService : Service() {
         }
         ServiceCompat.startForeground(this, 1, notif(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         if (bubble == null && !Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY }
+        when (i?.action) {
+            OPEN -> if (panel != null) closePanel() else openPanel()
+            TOGGLE -> {
+                Store.prefs.edit().putBoolean("bubbleVisible", !Store.prefs.getBoolean("bubbleVisible", true)).apply()
+                applyBubbleVis()
+                getSystemService(NotificationManager::class.java).notify(1, notif())
+            }
+        }
         return START_STICKY
     }
 
@@ -159,15 +171,26 @@ class FloatingService : Service() {
         super.onDestroy()
     }
 
+    private fun svc(code: Int, action: String): PendingIntent = PendingIntent.getService(
+        this, code, Intent(this, FloatingService::class.java).setAction(action),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+    )
+
     private fun notif(): Notification {
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val stop = PendingIntent.getService(this, 1, Intent(this, FloatingService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE)
+        val vis = Store.prefs.getBoolean("bubbleVisible", true)
+        val openPi = svc(0, OPEN)
         return Notification.Builder(this, CH)
             .setSmallIcon(R.drawable.ic_pin)
-            .setContentTitle("PinClip is running")
-            .setContentText("Tap the bubble to open your clipboard")
-            .setContentIntent(open)
-            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_close), "Hide bubble", stop).build())
+            .setContentTitle("PinClip")
+            .setContentText("Tap to open your clipboard")
+            .setContentIntent(openPi)
+            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_clip), "Open", openPi).build())
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, R.drawable.ic_pin), if (vis) "Hide bubble" else "Show bubble", svc(3, TOGGLE)
+                ).build()
+            )
+            .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_close), "Stop", svc(1, STOP)).build())
             .setOngoing(true)
             .build()
     }
@@ -199,7 +222,12 @@ class FloatingService : Service() {
         bubbleLp = lp
         wm.addView(v, lp)
         applyAlpha()
+        applyBubbleVis()
         attachDrag(v, { bubble }, { bubbleLp }, { openPanel() }, { snap() })
+    }
+
+    private fun applyBubbleVis() {
+        bubble?.visibility = if (panel == null && Store.prefs.getBoolean("bubbleVisible", true)) View.VISIBLE else View.GONE
     }
 
     private fun applyAlpha() {
@@ -261,16 +289,16 @@ class FloatingService : Service() {
 
     private fun openPanel() {
         if (panel != null) return
-        bubble?.visibility = View.GONE
         buildPanel()
+        applyBubbleVis()
     }
 
     private fun closePanel() {
         hideKb()
         panel?.let { try { wm.removeView(it) } catch (e: Exception) {} }
-        panel = null; panelLp = null; body = null; multiBar = null; chipRow = null; searchBox = null
+        panel = null; panelLp = null; body = null; multiBar = null; chipRow = null; actionRow = null; confirmBulk = false; searchBox = null
         multi = false; editorOpen = false; selected.clear(); pendingDelete = null
-        bubble?.visibility = View.VISIBLE
+        applyBubbleVis()
         applyAlpha()
     }
 
@@ -336,6 +364,15 @@ class FloatingService : Service() {
         title.setTypeface(title.typeface, Typeface.BOLD)
         title.setPadding(dp(10), dp(8), 0, dp(8))
         head.addView(title, LP(0, WRAP, 1f))
+        val readB = iconView(R.drawable.ic_read, if (Store.prefs.getBoolean("reading", false)) C.ACCENT else C.SUB)
+        readB.setOnClickListener {
+            val on = !Store.prefs.getBoolean("reading", false)
+            Store.prefs.edit().putBoolean("reading", on).apply()
+            readB.setColorFilter(if (on) C.ACCENT else C.SUB)
+            toast(if (on) "Reading mode: full text" else "Reading mode off")
+            renderList()
+        }
+        head.addView(readB)
         val multiB = iconView(R.drawable.ic_multi, C.SUB)
         multiB.setOnClickListener {
             multi = !multi
@@ -345,6 +382,18 @@ class FloatingService : Service() {
             renderList()
         }
         head.addView(multiB)
+        val imgB = iconView(R.drawable.ic_image, C.ACCENT)
+        imgB.setOnClickListener {
+            try {
+                val i = Intent(this, ImagePickActivity::class.java)
+                i.putExtra("group", curGroup())
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(i)
+            } catch (e: Exception) {
+                toast("Open the PinClip app and tap Add images")
+            }
+        }
+        head.addView(imgB)
         val addB = iconView(R.drawable.ic_add, C.ACCENT)
         addB.setOnClickListener {
             showEditor("New text", "", curGroup(), true, false, null) { t, g ->
@@ -393,6 +442,14 @@ class FloatingService : Service() {
         chipRow = row
         root.addView(hs, LP(MATCH, WRAP).apply { topMargin = dp(8) })
 
+        // paste-all row
+        val ar = LinearLayout(this)
+        ar.orientation = LinearLayout.HORIZONTAL
+        ar.gravity = Gravity.CENTER_VERTICAL
+        ar.visibility = View.GONE
+        actionRow = ar
+        root.addView(ar, LP(MATCH, WRAP).apply { topMargin = dp(8) })
+
         // body
         val b = FrameLayout(this)
         body = b
@@ -400,8 +457,7 @@ class FloatingService : Service() {
 
         // multi bar
         val mb = LinearLayout(this)
-        mb.orientation = LinearLayout.HORIZONTAL
-        mb.gravity = Gravity.CENTER_VERTICAL
+        mb.orientation = LinearLayout.VERTICAL
         mb.visibility = View.GONE
         multiBar = mb
         root.addView(mb, LP(MATCH, WRAP).apply { topMargin = dp(8) })
@@ -480,6 +536,7 @@ class FloatingService : Service() {
         showEditor("Rename group", g.name, null, false, true, "Delete group" to {
             Store.deleteGroup(g.id)
             if (filter == g.id) filter = "all"
+            Unit
         }) { t, _ -> Store.renameGroup(g, t); renderChips() }
     }
 
@@ -507,9 +564,10 @@ class FloatingService : Service() {
 
     private fun renderList() {
         val b = body ?: return
+        val list = filtered()
+        updateActionRow(list)
         if (editorOpen) return
         b.removeAllViews()
-        val list = filtered()
         if (list.isEmpty()) {
             val e = label("Nothing here yet.\nTap + to add text, or turn on Auto detect.", 13f, C.SUB)
             e.gravity = Gravity.CENTER
@@ -548,10 +606,19 @@ class FloatingService : Service() {
             val tf = Store.thumb(x)
             if (tf.exists()) iv.setImageBitmap(BitmapFactory.decodeFile(tf.path))
             mid.addView(iv, LP(MATCH, WRAP))
+            if (x.text.isNotBlank()) {
+                val cl = label(x.text, 13f)
+                cl.maxLines = 2
+                cl.ellipsize = TextUtils.TruncateAt.END
+                cl.setPadding(0, dp(4), 0, 0)
+                mid.addView(cl)
+            }
         } else {
             val t = label(x.text, 14f)
-            t.maxLines = 4
-            t.ellipsize = TextUtils.TruncateAt.END
+            if (!Store.prefs.getBoolean("reading", false)) {
+                t.maxLines = 4
+                t.ellipsize = TextUtils.TruncateAt.END
+            }
             mid.addView(t)
         }
         val meta = listOfNotNull(
@@ -564,22 +631,15 @@ class FloatingService : Service() {
 
         val right = LinearLayout(this)
         right.orientation = LinearLayout.VERTICAL
-        if (x.image == null) {
-            val ed = iconView(R.drawable.ic_edit, C.SUB, 16, 5)
-            ed.setOnClickListener {
+        val ed = iconView(R.drawable.ic_edit, C.SUB, 16, 5)
+        ed.setOnClickListener {
+            if (x.image == null) {
                 showEditor("Edit text", x.text, x.groupId, true, false, null) { t, g -> Store.update(x, t, g) }
+            } else {
+                showEditor("Edit image card", x.text, x.groupId, true, false, null, true, x) { t, g -> Store.update(x, t.trim(), g) }
             }
-            right.addView(ed)
-        } else {
-            val gr = iconView(R.drawable.ic_group, C.SUB, 16, 5)
-            gr.setOnClickListener {
-                val ids = listOf<String?>(null) + Store.groups.map { g -> g.id }
-                val next = ids[(ids.indexOf(x.groupId) + 1) % ids.size]
-                Store.setGroup(x, next)
-                toast("Group: " + (Store.groups.find { g -> g.id == next }?.name ?: "None"))
-            }
-            right.addView(gr)
         }
+        right.addView(ed)
         val cp = iconView(R.drawable.ic_copy, C.SUB, 16, 5)
         cp.setOnClickListener { copyOnly(x) }
         right.addView(cp)
@@ -615,37 +675,144 @@ class FloatingService : Service() {
         return row
     }
 
+    private fun updateActionRow(list: List<Item>) {
+        val ar = actionRow ?: return
+        ar.removeAllViews()
+        val n = list.count { it.image == null }
+        if (editorOpen || multi || n == 0) { ar.visibility = View.GONE; return }
+        ar.visibility = View.VISIBLE
+        val go = pill("Paste all ($n)", C.ACCENT, Color.WHITE)
+        go.setOnClickListener { pasteTexts(list) }
+        ar.addView(go, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
+        val sp = pill("Join: " + seps[sep].first, C.CARD2)
+        sp.setOnClickListener { sep = (sep + 1) % seps.size; updateActionRow(filtered()) }
+        ar.addView(sp)
+    }
+
     private fun updateMultiBar() {
         val bar = multiBar ?: return
         bar.removeAllViews()
         bar.visibility = if (multi) View.VISIBLE else View.GONE
         if (!multi) return
-        bar.addView(label("${selected.size} selected", 13f, C.SUB), LP(0, WRAP, 1f))
+
+        val r1 = LinearLayout(this)
+        r1.orientation = LinearLayout.HORIZONTAL
+        r1.gravity = Gravity.CENTER_VERTICAL
+        r1.addView(label("${selected.size} ✓", 13f, C.SUB), LP(0, WRAP, 1f))
         val sp = pill(seps[sep].first, C.CARD2)
         sp.setOnClickListener { sep = (sep + 1) % seps.size; updateMultiBar() }
-        bar.addView(sp, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
-        val go = pill("Paste", C.ACCENT, Color.WHITE)
-        go.setOnClickListener { pasteMany() }
-        bar.addView(go, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
+        r1.addView(sp, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
+        val all = pill("Select all", C.CARD2)
+        all.setOnClickListener {
+            val ids = filtered().map { it.id }
+            if (selected.containsAll(ids)) selected.clear() else selected.addAll(ids)
+            updateMultiBar()
+            renderList()
+        }
+        r1.addView(all, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
         val done = pill("Done", C.CARD2)
-        done.setOnClickListener { multi = false; selected.clear(); updateMultiBar(); renderList() }
-        bar.addView(done)
+        done.setOnClickListener { multi = false; selected.clear(); confirmBulk = false; updateMultiBar(); renderList() }
+        r1.addView(done)
+        bar.addView(r1, LP(MATCH, WRAP))
+
+        val r2 = LinearLayout(this)
+        r2.orientation = LinearLayout.HORIZONTAL
+        r2.gravity = Gravity.CENTER_VERTICAL
+        val go = pill("Paste", C.ACCENT, Color.WHITE)
+        go.setOnClickListener {
+            if (selected.isEmpty()) toast("Select cards first")
+            else pasteTexts(filtered().filter { selected.contains(it.id) })
+        }
+        r2.addView(go, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
+        val mv = pill("Move to group", C.CARD2, C.ACCENT)
+        mv.setOnClickListener {
+            if (selected.isEmpty()) {
+                toast("Select cards first")
+            } else {
+                showPicker("Move ${selected.size} cards to…") { g ->
+                    Store.moveMany(selected.toList(), g)
+                    multi = false
+                    selected.clear()
+                    updateMultiBar()
+                    renderList()
+                }
+            }
+        }
+        r2.addView(mv, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
+        val del = pill(if (confirmBulk) "Tap again" else "Delete", C.CARD2, C.RED)
+        del.setOnClickListener {
+            if (selected.isEmpty()) {
+                toast("Select cards first")
+            } else if (confirmBulk) {
+                Store.deleteMany(selected.toList())
+                selected.clear()
+                confirmBulk = false
+                multi = false
+                updateMultiBar()
+                renderList()
+            } else {
+                confirmBulk = true
+                updateMultiBar()
+                h.postDelayed({ if (confirmBulk) { confirmBulk = false; updateMultiBar() } }, 3000)
+            }
+        }
+        r2.addView(del)
+        bar.addView(r2, LP(MATCH, WRAP).apply { topMargin = dp(6) })
+    }
+
+    private fun showPicker(title: String, onPick: (String?) -> Unit) {
+        val b = body ?: return
+        editorOpen = true
+        actionRow?.visibility = View.GONE
+        b.removeAllViews()
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.addView(label(title, 13f, C.SUB))
+        val sv = ScrollView(this)
+        val opts = LinearLayout(this)
+        opts.orientation = LinearLayout.VERTICAL
+        fun opt(text: String, gid: String?) {
+            val p = pill(text, C.CARD, C.TEXT)
+            p.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            p.setOnClickListener { editorOpen = false; renderList(); onPick(gid) }
+            opts.addView(p, LP(MATCH, WRAP).apply { topMargin = dp(6) })
+        }
+        opt("No group", null)
+        Store.groups.forEach { opt(it.name, it.id) }
+        if (Store.groups.isEmpty()) opts.addView(label("Create groups with “+ Group” first.", 12f, C.SUB))
+        sv.addView(opts)
+        col.addView(sv, LP(MATCH, 0, 1f))
+        val cancel = pill("Cancel", C.CARD2)
+        cancel.setOnClickListener { editorOpen = false; renderList() }
+        col.addView(cancel, LP(WRAP, WRAP).apply { topMargin = dp(8) })
+        b.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
     }
 
     // ───────────────────────── editor ─────────────────────────
 
     private fun showEditor(
         title: String, initial: String, group: String?, withGroup: Boolean, single: Boolean,
-        danger: Pair<String, () -> Unit>?, onSave: (String, String?) -> Unit
+        danger: Pair<String, () -> Unit>?, allowBlank: Boolean = false, preview: Item? = null,
+        onSave: (String, String?) -> Unit
     ) {
         val b = body ?: return
         editorOpen = true
+        actionRow?.visibility = View.GONE
         setFocusable(true)
         b.removeAllViews()
         var gid = group
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         col.addView(label(title, 13f, C.SUB))
+        if (preview != null) {
+            val pv = ImageView(this)
+            pv.adjustViewBounds = true
+            pv.scaleType = ImageView.ScaleType.CENTER_CROP
+            pv.maxHeight = dp(80)
+            val tf = Store.thumb(preview)
+            if (tf.exists()) pv.setImageBitmap(BitmapFactory.decodeFile(tf.path))
+            col.addView(pv, LP(MATCH, WRAP).apply { topMargin = dp(6) })
+        }
 
         val et = EditText(this)
         val btns = LinearLayout(this)
@@ -656,7 +823,7 @@ class FloatingService : Service() {
         val save = pill("Save", C.ACCENT, Color.WHITE)
         save.setOnClickListener {
             val v = et.text.toString()
-            if (v.isNotBlank()) {
+            if (allowBlank || v.isNotBlank()) {
                 closeEditor()
                 onSave(v, gid)
             }
@@ -684,7 +851,7 @@ class FloatingService : Service() {
         et.setText(initial)
         et.setTextColor(C.TEXT)
         et.setHintTextColor(C.SUB)
-        et.hint = if (single) "Name" else "Type or paste text… ({date} and {time} work too)"
+        et.hint = if (single) "Name" else if (preview != null) "Caption (optional)" else "Type or paste text… ({date} and {time} work too)"
         et.textSize = 15f
         et.background = rounded(C.CARD, 12)
         et.setPadding(dp(12), dp(10), dp(12), dp(10))
@@ -747,10 +914,11 @@ class FloatingService : Service() {
         toast("Copied")
     }
 
-    private fun pasteMany() {
-        val picked = filtered().filter { selected.contains(it.id) && it.image == null }
-        if (picked.isEmpty()) { toast("Select some text cards first"); return }
-        picked.forEach { Store.touch(it) }
+    /** Pastes many text cards as one block, oldest first. */
+    private fun pasteTexts(src: List<Item>) {
+        val picked = src.filter { it.image == null }.sortedBy { it.created }
+        if (picked.isEmpty()) { toast("No text cards to paste"); return }
+        Store.touchMany(picked)
         val joined = picked.joinToString(seps[sep].second) { Store.expand(it.text) }
         hideKb()
         setFocusable(false)

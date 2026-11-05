@@ -26,3 +26,7 @@ installing the first build made with this key.
 ## Never lose Accessibility
 Run once from a PC with USB debugging: `adb shell pm grant com.pinclip.app android.permission.WRITE_SECURE_SETTINGS`.
 After that PinClip re-enables its own accessibility service whenever it gets switched off.
+
+## Backup
+Home screen → Library → **Backup (export)** writes one `.zip` (cards, groups, images). **Restore (import)** can
+merge it into the current data or replace everything.

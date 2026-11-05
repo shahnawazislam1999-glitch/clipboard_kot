@@ -11,13 +11,19 @@ import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
 data class Group(val id: String, var name: String)
 
+/** For image cards, [text] is an optional caption. */
 data class Item(
     val id: String,
     var text: String,
@@ -43,7 +49,8 @@ object Store {
         if (inited) return
         app = ctx.applicationContext
         prefs = app.getSharedPreferences("pinclip", Context.MODE_PRIVATE)
-        load()
+        val s = prefs.getString("data", null)
+        if (s != null) parse(s, groups, items)
         inited = true
     }
 
@@ -59,19 +66,18 @@ object Store {
             .replace("{time}", SimpleDateFormat("HH:mm", Locale.getDefault()).format(now))
     }
 
-    private fun load() {
-        val s = prefs.getString("data", null) ?: return
+    private fun parse(s: String, gOut: MutableList<Group>, iOut: MutableList<Item>) {
         try {
             val o = JSONObject(s)
             val ga = o.optJSONArray("groups") ?: JSONArray()
             for (i in 0 until ga.length()) {
                 val g = ga.getJSONObject(i)
-                groups.add(Group(g.getString("id"), g.getString("name")))
+                gOut.add(Group(g.getString("id"), g.getString("name")))
             }
             val ia = o.optJSONArray("items") ?: JSONArray()
             for (i in 0 until ia.length()) {
                 val x = ia.getJSONObject(i)
-                items.add(
+                iOut.add(
                     Item(
                         x.getString("id"),
                         x.optString("text", ""),
@@ -87,7 +93,7 @@ object Store {
         }
     }
 
-    private fun save() {
+    private fun json(): String {
         val ga = JSONArray()
         groups.forEach { ga.put(JSONObject().put("id", it.id).put("name", it.name)) }
         val ia = JSONArray()
@@ -98,9 +104,10 @@ object Store {
                     .put("uses", it.uses).put("created", it.created)
             )
         }
-        val o = JSONObject().put("groups", ga).put("items", ia)
-        prefs.edit().putString("data", o.toString()).apply()
+        return JSONObject().put("app", "PinClip").put("version", 1).put("groups", ga).put("items", ia).toString()
     }
+
+    private fun save() { prefs.edit().putString("data", json()).apply() }
 
     fun addText(text: String, group: String? = null): Boolean {
         if (text.isBlank()) return false
@@ -113,6 +120,22 @@ object Store {
         items.add(Item(UUID.randomUUID().toString(), text, null, group, false, 0, System.currentTimeMillis()))
         save(); notifyChange()
         return true
+    }
+
+    private fun makeThumb(f: File, id: String) {
+        try {
+            val bo = BitmapFactory.Options()
+            bo.inJustDecodeBounds = true
+            BitmapFactory.decodeFile(f.path, bo)
+            if (bo.outWidth <= 0) return
+            var s = 1
+            while (bo.outWidth / s > 640) s *= 2
+            val so = BitmapFactory.Options()
+            so.inSampleSize = s
+            val t = BitmapFactory.decodeFile(f.path, so) ?: return
+            File(f.parentFile, "$id.jpg").outputStream().use { t.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+        } catch (e: Exception) {
+        }
     }
 
     /** Copies the image into private storage (safe to call from any thread). */
@@ -129,12 +152,7 @@ object Store {
             bo.inJustDecodeBounds = true
             BitmapFactory.decodeFile(f.path, bo)
             if (bo.outWidth <= 0) { f.delete(); return }
-            var s = 1
-            while (bo.outWidth / s > 640) s *= 2
-            val so = BitmapFactory.Options()
-            so.inSampleSize = s
-            val t = BitmapFactory.decodeFile(f.path, so)
-            if (t != null) File(dir, "$id.jpg").outputStream().use { t.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            makeThumb(f, id)
             main.post {
                 items.add(Item(id, "", name, group, false, 0, System.currentTimeMillis()))
                 save(); notifyChange()
@@ -177,6 +195,98 @@ object Store {
         save(); notifyChange()
     }
 
+    fun deleteMany(ids: List<String>) {
+        val set = ids.toHashSet()
+        items.filter { set.contains(it.id) }.forEach {
+            if (it.image != null) { imageFile(it).delete(); thumb(it).delete() }
+        }
+        items.removeAll { set.contains(it.id) }
+        save(); notifyChange()
+    }
+
+    fun moveMany(ids: List<String>, g: String?) {
+        val set = ids.toHashSet()
+        items.forEach { if (set.contains(it.id)) it.groupId = g }
+        save(); notifyChange()
+    }
+
+    fun touchMany(list: List<Item>) {
+        list.forEach { it.uses++ }
+        save(); notifyChange()
+    }
+
     fun exportText(): String =
         items.filter { it.image == null }.joinToString("\n\n-----\n\n") { it.text }
+
+    // ───────────── backup / restore (zip: data.json + img/*) ─────────────
+
+    /** Call on the main thread, then hand the results to [writeZip] on any thread. */
+    fun backupJson(): String = json()
+
+    fun backupImages(): List<Pair<String, File>> =
+        items.filter { it.image != null && imageFile(it).exists() }.map { it.image!! to imageFile(it) }
+
+    fun writeZip(out: OutputStream, js: String, imgs: List<Pair<String, File>>) {
+        ZipOutputStream(out).use { z ->
+            z.putNextEntry(ZipEntry("data.json"))
+            z.write(js.toByteArray(Charsets.UTF_8))
+            z.closeEntry()
+            for ((n, f) in imgs) {
+                z.putNextEntry(ZipEntry("img/$n"))
+                f.inputStream().use { it.copyTo(z) }
+                z.closeEntry()
+            }
+        }
+    }
+
+    /** Call from a background thread. [done] runs on the main thread with the number of cards added, or -1 on error. */
+    fun importZip(inp: InputStream, replace: Boolean, done: (Int) -> Unit) {
+        try {
+            val dir = File(app.filesDir, "img")
+            dir.mkdirs()
+            var js: String? = null
+            ZipInputStream(inp).use { z ->
+                var e = z.nextEntry
+                while (e != null) {
+                    val n = e.name
+                    if (!e.isDirectory) {
+                        if (n == "data.json") {
+                            js = z.readBytes().toString(Charsets.UTF_8)
+                        } else if (n.startsWith("img/")) {
+                            val fn = File(n).name
+                            if (fn.isNotEmpty()) File(dir, fn).outputStream().use { o -> z.copyTo(o) }
+                        }
+                    }
+                    z.closeEntry()
+                    e = z.nextEntry
+                }
+            }
+            val text = js
+            if (text == null) { main.post { done(-1) }; return }
+            val gs = ArrayList<Group>()
+            val its = ArrayList<Item>()
+            parse(text, gs, its)
+            its.filter { it.image != null }.forEach { makeThumb(File(dir, it.image!!), it.id) }
+            main.post {
+                if (replace) {
+                    items.filter { old -> old.image != null && its.none { n -> n.id == old.id } }
+                        .forEach { old -> imageFile(old).delete(); thumb(old).delete() }
+                    items.clear()
+                    groups.clear()
+                }
+                var c = 0
+                gs.forEach { g -> if (groups.none { it.id == g.id }) groups.add(g) }
+                its.forEach { x ->
+                    if (items.none { it.id == x.id } && (x.image == null || imageFile(x).exists())) {
+                        items.add(x)
+                        c++
+                    }
+                }
+                save(); notifyChange()
+                done(c)
+            }
+        } catch (e: Exception) {
+            main.post { done(-1) }
+        }
+    }
 }
