@@ -483,7 +483,7 @@ class FloatingService : Service() {
         et.isSingleLine = true
         et.imeOptions = EditorInfo.IME_ACTION_DONE
         et.setText(query)
-        et.doAfterTextChanged { query = it?.toString() ?: ""; renderList() }
+        et.doAfterTextChanged { query = it?.toString() ?: ""; renderList(true) }
         et.setOnTouchListener { _, e ->
             if (e.action == MotionEvent.ACTION_DOWN) {
                 setFocusable(true)
@@ -592,7 +592,7 @@ class FloatingService : Service() {
         fun chip(text: String, key: String, g: Group?) {
             val sel = filter == key
             val t = tiny(text, if (sel) C.ACCENT else C.CARD, if (sel) Color.WHITE else C.TEXT)
-            t.setOnClickListener { filter = key; renderChips(); renderList() }
+            t.setOnClickListener { filter = key; renderChips(); renderList(true) }
             if (g != null) t.setOnLongClickListener { groupMenu(g); true }
             row.addView(t, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
         }
@@ -637,11 +637,13 @@ class FloatingService : Service() {
             l.sortedWith(compareByDescending<Item> { it.pinned }.thenByDescending { it.created })
     }
 
-    private fun renderList() {
+    private fun renderList(resetScroll: Boolean = false) {
         val b = body ?: return
         val list = filtered()
         updateActionRow(list)
         if (editorOpen) return
+        // remember where the user was so a paste/refresh doesn't jump back to the top
+        val oldScroll = (b.getChildAt(0) as? ScrollView)?.scrollY ?: 0
         b.removeAllViews()
         if (list.isEmpty()) {
             val e = label("Nothing here yet.\nTap + to add text, or turn on Auto detect.", 13f, C.SUB)
@@ -655,6 +657,9 @@ class FloatingService : Service() {
         for (it0 in list) col.addView(card(it0), LP(MATCH, WRAP).apply { bottomMargin = dp(6) })
         sv.addView(col)
         b.addView(sv, FrameLayout.LayoutParams(MATCH, MATCH))
+        if (!resetScroll && oldScroll > 0) {
+            sv.post { sv.scrollTo(0, oldScroll) }
+        }
     }
 
     private fun card(x: Item): View {
