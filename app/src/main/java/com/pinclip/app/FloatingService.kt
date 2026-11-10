@@ -85,6 +85,7 @@ class FloatingService : Service() {
     private var query = ""
     private var multi = false
     private var editorOpen = false
+    private var lastScrollY = 0   // list scroll kept across minimize / reopen
     private val selected = LinkedHashSet<String>()
     private var pendingDelete: String? = null
     private var sep = 0
@@ -302,6 +303,7 @@ class FloatingService : Service() {
 
     private fun closePanel() {
         hideKb()
+        saveScroll()
         panel?.let { try { wm.removeView(it) } catch (e: Exception) {} }
         panel = null; panelLp = null; body = null; multiBar = null; chipRow = null; actionRow = null; confirmBulk = false; searchBox = null; searchRow = null
         multi = false; editorOpen = false; selected.clear(); pendingDelete = null
@@ -326,6 +328,7 @@ class FloatingService : Service() {
     }
 
     private fun savePanelGeometry() {
+        if (isFull()) return   // keep the normal-size geometry for when full screen is switched off
         val lp = panelLp ?: return
         Store.prefs.edit().putInt("px", lp.x).putInt("py", lp.y).putInt("pw", lp.width).putInt("ph", fullH).apply()
     }
@@ -353,8 +356,54 @@ class FloatingService : Service() {
         (ar.parent as? View)?.visibility = v
     }
 
+    private fun isFull() = Store.prefs.getBoolean("pfull", false)
+
+    /** Real screen size in the current orientation (follows rotation). */
+    private fun screenWH(): Pair<Int, Int> {
+        return if (Build.VERSION.SDK_INT >= 30) {
+            val b = wm.maximumWindowMetrics.bounds
+            b.width() to b.height()
+        } else {
+            val m = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(m)
+            m.widthPixels to m.heightPixels
+        }
+    }
+
+    private fun statusBarH(): Int {
+        val id = resources.getIdentifier("status_bar_height", "dimen", "android")
+        return if (id > 0) resources.getDimensionPixelSize(id) else dp(24)
+    }
+
+    /** Re-fit the full-screen panel after rotation, without rebuilding it. */
+    private fun refitFull() {
+        val p = panel ?: return
+        val lp = panelLp ?: return
+        if (!isFull()) return
+        val (sw, sh) = screenWH()
+        val sb = statusBarH()
+        lp.x = 0; lp.y = sb; lp.width = sw
+        fullH = sh - sb
+        shortH = maxOf(minOf(fullH, (sh * 0.42f).toInt()), dp(200))
+        lp.height = if ((lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) == 0) shortH else fullH
+        try { wm.updateViewLayout(p, lp) } catch (e: Exception) {}
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        h.postDelayed({
+            refitFull()
+            if (bubble != null) snap()
+        }, 150)
+    }
+
+    private fun saveScroll() {
+        (body?.getChildAt(0) as? ScrollView)?.let { lastScrollY = it.scrollY }
+    }
+
     private fun rebuildPanel() {
         hideKb()
+        saveScroll()
         panel?.let { try { wm.removeView(it) } catch (e: Exception) {} }
         panel = null; panelLp = null; body = null; multiBar = null; chipRow = null; actionRow = null
         searchBox = null; searchRow = null; editorOpen = false
@@ -368,9 +417,12 @@ class FloatingService : Service() {
         val dm = resources.displayMetrics
         val sw = dm.widthPixels
         val sh = dm.heightPixels
-        val w = Store.prefs.getInt("pw", minOf(dp(340), sw - dp(16))).coerceIn(dp(150), sw)
-        fullH = Store.prefs.getInt("ph", (sh * 0.62f).toInt()).coerceIn(dp(140), sh)
-        shortH = maxOf(minOf(fullH, (sh * 0.42f).toInt()), dp(200))
+        val full = isFull()
+        val (rw, rh) = screenWH()
+        val sb = if (full) statusBarH() else 0
+        val w = if (full) rw else Store.prefs.getInt("pw", minOf(dp(340), sw - dp(16))).coerceIn(dp(150), sw)
+        fullH = if (full) rh - sb else Store.prefs.getInt("ph", (sh * 0.62f).toInt()).coerceIn(dp(140), sh)
+        shortH = maxOf(minOf(fullH, ((if (full) rh else sh) * 0.42f).toInt()), dp(200))
         compact = w < dp(300)
 
         val root = LinearLayout(this)
@@ -388,6 +440,13 @@ class FloatingService : Service() {
         minB.background = rounded(C.CARD2, 14)
         minB.setOnClickListener { closePanel() }
         head.addView(minB)
+        val fsB = ic(if (full) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen, if (full) C.ACCENT else C.TEXT)
+        fsB.background = rounded(C.CARD2, 14)
+        fsB.setOnClickListener {
+            Store.prefs.edit().putBoolean("pfull", !full).apply()
+            rebuildPanel()
+        }
+        head.addView(fsB, LP(WRAP, WRAP).apply { leftMargin = dp(4) })
         head.addView(ic(R.drawable.ic_pin, C.AMBER))
         if (!compact) {
             val title = label("PinClip", 15f)
@@ -483,7 +542,7 @@ class FloatingService : Service() {
         et.isSingleLine = true
         et.imeOptions = EditorInfo.IME_ACTION_DONE
         et.setText(query)
-        et.doAfterTextChanged { query = it?.toString() ?: ""; renderList() }
+        et.doAfterTextChanged { query = it?.toString() ?: ""; renderList(true) }
         et.setOnTouchListener { _, e ->
             if (e.action == MotionEvent.ACTION_DOWN) {
                 setFocusable(true)
@@ -538,19 +597,26 @@ class FloatingService : Service() {
         val gripRow = LinearLayout(this)
         gripRow.gravity = Gravity.END
         val grip = iconView(R.drawable.ic_resize, C.SUB, 18, 5)
-        gripRow.addView(grip)
-        root.addView(gripRow, LP(MATCH, WRAP))
-        attachResize(grip)
+        if (!full) {
+            gripRow.addView(grip)
+            root.addView(gripRow, LP(MATCH, WRAP))
+            attachResize(grip)
+        }
 
         val lp = overlayLp(w, fullH)
         lp.gravity = Gravity.TOP or Gravity.START
-        lp.x = Store.prefs.getInt("px", (sw - w) / 2).coerceIn(0, maxOf(0, sw - w))
-        lp.y = Store.prefs.getInt("py", dp(60)).coerceIn(0, maxOf(0, sh - dp(120)))
+        if (full) {
+            lp.x = 0
+            lp.y = sb
+        } else {
+            lp.x = Store.prefs.getInt("px", (sw - w) / 2).coerceIn(0, maxOf(0, sw - w))
+            lp.y = Store.prefs.getInt("py", dp(60)).coerceIn(0, maxOf(0, sh - dp(120)))
+        }
         lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         panel = root
         panelLp = lp
         wm.addView(root, lp)
-        attachDrag(head, { panel }, { panelLp }, null) { savePanelGeometry() }
+        if (!full) attachDrag(head, { panel }, { panelLp }, null) { savePanelGeometry() }
         applyPanelAlpha()
 
         renderChips()
@@ -592,7 +658,7 @@ class FloatingService : Service() {
         fun chip(text: String, key: String, g: Group?) {
             val sel = filter == key
             val t = tiny(text, if (sel) C.ACCENT else C.CARD, if (sel) Color.WHITE else C.TEXT)
-            t.setOnClickListener { filter = key; renderChips(); renderList() }
+            t.setOnClickListener { filter = key; renderChips(); renderList(true) }
             if (g != null) t.setOnLongClickListener { groupMenu(g); true }
             row.addView(t, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
         }
@@ -637,11 +703,14 @@ class FloatingService : Service() {
             l.sortedWith(compareByDescending<Item> { it.pinned }.thenByDescending { it.created })
     }
 
-    private fun renderList() {
+    private fun renderList(resetScroll: Boolean = false) {
         val b = body ?: return
         val list = filtered()
         updateActionRow(list)
         if (editorOpen) return
+        // remember where the user was so a paste/refresh doesn't jump back to the top
+        val oldScroll = if (resetScroll) 0 else ((b.getChildAt(0) as? ScrollView)?.scrollY ?: lastScrollY)
+        lastScrollY = oldScroll
         b.removeAllViews()
         if (list.isEmpty()) {
             val e = label("Nothing here yet.\nTap + to add text, or turn on Auto detect.", 13f, C.SUB)
@@ -655,6 +724,15 @@ class FloatingService : Service() {
         for (it0 in list) col.addView(card(it0), LP(MATCH, WRAP).apply { bottomMargin = dp(6) })
         sv.addView(col)
         b.addView(sv, FrameLayout.LayoutParams(MATCH, MATCH))
+        if (oldScroll > 0) {
+            // wait until the list is laid out, otherwise the scroll gets clamped to 0
+            sv.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    if (sv.viewTreeObserver.isAlive) sv.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    sv.scrollTo(0, oldScroll)
+                }
+            })
+        }
     }
 
     private fun card(x: Item): View {
