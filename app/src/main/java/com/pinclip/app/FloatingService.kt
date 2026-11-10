@@ -85,6 +85,7 @@ class FloatingService : Service() {
     private var query = ""
     private var multi = false
     private var editorOpen = false
+    private var lastScrollY = 0   // list scroll kept across minimize / reopen
     private val selected = LinkedHashSet<String>()
     private var pendingDelete: String? = null
     private var sep = 0
@@ -302,6 +303,7 @@ class FloatingService : Service() {
 
     private fun closePanel() {
         hideKb()
+        saveScroll()
         panel?.let { try { wm.removeView(it) } catch (e: Exception) {} }
         panel = null; panelLp = null; body = null; multiBar = null; chipRow = null; actionRow = null; confirmBulk = false; searchBox = null; searchRow = null
         multi = false; editorOpen = false; selected.clear(); pendingDelete = null
@@ -353,8 +355,13 @@ class FloatingService : Service() {
         (ar.parent as? View)?.visibility = v
     }
 
+    private fun saveScroll() {
+        (body?.getChildAt(0) as? ScrollView)?.let { lastScrollY = it.scrollY }
+    }
+
     private fun rebuildPanel() {
         hideKb()
+        saveScroll()
         panel?.let { try { wm.removeView(it) } catch (e: Exception) {} }
         panel = null; panelLp = null; body = null; multiBar = null; chipRow = null; actionRow = null
         searchBox = null; searchRow = null; editorOpen = false
@@ -483,7 +490,7 @@ class FloatingService : Service() {
         et.isSingleLine = true
         et.imeOptions = EditorInfo.IME_ACTION_DONE
         et.setText(query)
-        et.doAfterTextChanged { query = it?.toString() ?: ""; renderList() }
+        et.doAfterTextChanged { query = it?.toString() ?: ""; renderList(true) }
         et.setOnTouchListener { _, e ->
             if (e.action == MotionEvent.ACTION_DOWN) {
                 setFocusable(true)
@@ -592,7 +599,7 @@ class FloatingService : Service() {
         fun chip(text: String, key: String, g: Group?) {
             val sel = filter == key
             val t = tiny(text, if (sel) C.ACCENT else C.CARD, if (sel) Color.WHITE else C.TEXT)
-            t.setOnClickListener { filter = key; renderChips(); renderList() }
+            t.setOnClickListener { filter = key; renderChips(); renderList(true) }
             if (g != null) t.setOnLongClickListener { groupMenu(g); true }
             row.addView(t, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
         }
@@ -637,11 +644,14 @@ class FloatingService : Service() {
             l.sortedWith(compareByDescending<Item> { it.pinned }.thenByDescending { it.created })
     }
 
-    private fun renderList() {
+    private fun renderList(resetScroll: Boolean = false) {
         val b = body ?: return
         val list = filtered()
         updateActionRow(list)
         if (editorOpen) return
+        // remember where the user was so a paste/refresh doesn't jump back to the top
+        val oldScroll = if (resetScroll) 0 else ((b.getChildAt(0) as? ScrollView)?.scrollY ?: lastScrollY)
+        lastScrollY = oldScroll
         b.removeAllViews()
         if (list.isEmpty()) {
             val e = label("Nothing here yet.\nTap + to add text, or turn on Auto detect.", 13f, C.SUB)
@@ -655,6 +665,15 @@ class FloatingService : Service() {
         for (it0 in list) col.addView(card(it0), LP(MATCH, WRAP).apply { bottomMargin = dp(6) })
         sv.addView(col)
         b.addView(sv, FrameLayout.LayoutParams(MATCH, MATCH))
+        if (oldScroll > 0) {
+            // wait until the list is laid out, otherwise the scroll gets clamped to 0
+            sv.viewTreeObserver.addOnGlobalLayoutListener(object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    if (sv.viewTreeObserver.isAlive) sv.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    sv.scrollTo(0, oldScroll)
+                }
+            })
+        }
     }
 
     private fun card(x: Item): View {
