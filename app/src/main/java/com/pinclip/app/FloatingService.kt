@@ -63,6 +63,7 @@ class FloatingService : Service() {
 
     private var bubble: FrameLayout? = null
     private var bubbleLp: WindowManager.LayoutParams? = null
+    private var handlePill: View? = null
     private var panel: LinearLayout? = null
     private var panelLp: WindowManager.LayoutParams? = null
     private var body: FrameLayout? = null
@@ -85,14 +86,15 @@ class FloatingService : Service() {
     private var query = ""
     private var multi = false
     private var editorOpen = false
-    private var lastScrollY = 0   // list scroll kept across minimize / reopen
+    private val scrollMap = HashMap<String, Int>()   // list scroll remembered per tab / group
+    private val expanded = HashSet<String>()         // cards opened to full text
     private val selected = LinkedHashSet<String>()
     private var pendingDelete: String? = null
     private var sep = 0
     private val seps = listOf("New line" to "\n", "Space" to " ", "Comma" to ", ")
 
     private val prefL = SharedPreferences.OnSharedPreferenceChangeListener { _, k ->
-        if (k == "alpha") applyAlpha() else if (k == "palpha") applyPanelAlpha() else if (k == "auto") applyAuto()
+        if (k == "halpha") applyAlpha() else if (k == "hcolor") styleHandle() else if (k == "palpha") applyPanelAlpha() else if (k == "auto") applyAuto()
     }
     private val clipL = ClipboardManager.OnPrimaryClipChangedListener { onClip("listener") }
     private val clipRun = Runnable { readClip() }
@@ -193,7 +195,7 @@ class FloatingService : Service() {
             .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_clip), "Open", openPi).build())
             .addAction(
                 Notification.Action.Builder(
-                    Icon.createWithResource(this, R.drawable.ic_pin), if (vis) "Hide bubble" else "Show bubble", svc(3, TOGGLE)
+                    Icon.createWithResource(this, R.drawable.ic_pin), if (vis) "Hide handle" else "Show handle", svc(3, TOGGLE)
                 ).build()
             )
             .addAction(Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_close), "Stop", svc(1, STOP)).build())
@@ -210,26 +212,43 @@ class FloatingService : Service() {
         PixelFormat.TRANSLUCENT
     )
 
+    private fun handleW() = dp(28)
+    private fun handleH() = dp(68)
+    private fun handleSide() = Store.prefs.getInt("hside", 1)   // 0 = left edge, 1 = right edge
+
+    /** Edge handle: a thin colour-coded pill on the left/right screen edge. Tap = open, hold + drag = move. */
     private fun addBubble() {
-        val size = dp(52)
         val v = FrameLayout(this)
-        val bg = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF6C8CFF.toInt(), 0xFF8E5BFF.toInt()))
-        bg.shape = GradientDrawable.OVAL
-        v.background = bg
-        val ic = ImageView(this)
-        ic.setImageResource(R.drawable.ic_clip)
-        ic.setColorFilter(Color.WHITE)
-        v.addView(ic, FrameLayout.LayoutParams(dp(26), dp(26), Gravity.CENTER))
-        val lp = overlayLp(size, size)
+        val pill = View(this)
+        v.addView(pill, FrameLayout.LayoutParams(dp(7), dp(54), Gravity.CENTER_VERTICAL or Gravity.END))
+        handlePill = pill
+        val (sw, sh) = screenWH()
+        val lp = overlayLp(handleW(), handleH())
         lp.gravity = Gravity.TOP or Gravity.START
-        lp.x = Store.prefs.getInt("bx", 0)
-        lp.y = Store.prefs.getInt("by", dp(240))
+        lp.x = if (handleSide() == 0) 0 else sw - handleW()
+        lp.y = Store.prefs.getInt("hy", dp(240)).coerceIn(0, maxOf(0, sh - handleH()))
         bubble = v
         bubbleLp = lp
         wm.addView(v, lp)
+        styleHandle()
         applyAlpha()
         applyBubbleVis()
-        attachDrag(v, { bubble }, { bubbleLp }, { openPanel() }, { snap() })
+        attachHandleTouch(v)
+    }
+
+    private fun styleHandle() {
+        val pill = handlePill ?: return
+        val left = handleSide() == 0
+        val col = Store.prefs.getInt("hcolor", HANDLE_COLORS[0])
+        val g = GradientDrawable()
+        g.setColor(col)
+        g.setStroke(dp(1), 0x66000000)
+        g.cornerRadius = dp(4).toFloat()
+        pill.background = g
+        (pill.layoutParams as? FrameLayout.LayoutParams)?.let {
+            it.gravity = Gravity.CENTER_VERTICAL or (if (left) Gravity.START else Gravity.END)
+            pill.layoutParams = it
+        }
     }
 
     private fun applyBubbleVis() {
@@ -237,18 +256,72 @@ class FloatingService : Service() {
     }
 
     private fun applyAlpha() {
-        val p = Store.prefs.getInt("alpha", 10).coerceIn(0, 100)
-        bubble?.alpha = (p / 100f).coerceAtLeast(0.03f)
+        val p = Store.prefs.getInt("halpha", 40).coerceIn(0, 100)
+        bubble?.alpha = p / 100f
     }
 
-    private fun snap() {
+    /** Glue the handle to the nearest edge (also used after rotation). */
+    private fun snap(side: Int = handleSide()) {
         val lp = bubbleLp ?: return
         val v = bubble ?: return
-        val dm = resources.displayMetrics
-        lp.x = if (lp.x + v.width / 2 < dm.widthPixels / 2) 0 else dm.widthPixels - v.width
-        lp.y = lp.y.coerceIn(0, dm.heightPixels - v.height)
+        val (sw, sh) = screenWH()
+        lp.x = if (side == 0) 0 else sw - handleW()
+        lp.y = lp.y.coerceIn(0, maxOf(0, sh - handleH()))
         try { wm.updateViewLayout(v, lp) } catch (e: Exception) {}
-        Store.prefs.edit().putInt("bx", lp.x).putInt("by", lp.y).apply()
+        Store.prefs.edit().putInt("hside", side).putInt("hy", lp.y).apply()
+        styleHandle()
+    }
+
+    private fun attachHandleTouch(v: View) {
+        var downX = 0f
+        var downY = 0f
+        var startY = 0
+        var dragging = false
+        var cancelled = false
+        val longRun = Runnable {
+            dragging = true
+            v.alpha = 1f
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        }
+        v.setOnTouchListener { _, e ->
+            val lp = bubbleLp ?: return@setOnTouchListener false
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX; downY = e.rawY; startY = lp.y
+                    dragging = false; cancelled = false
+                    v.alpha = 1f
+                    h.postDelayed(longRun, 350)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (dragging) {
+                        val (sw, sh) = screenWH()
+                        lp.y = (startY + (e.rawY - downY)).toInt().coerceIn(0, maxOf(0, sh - handleH()))
+                        lp.x = (e.rawX - handleW() / 2f).toInt().coerceIn(0, maxOf(0, sw - handleW()))
+                        try { wm.updateViewLayout(v, lp) } catch (ex: Exception) {}
+                    } else if (!cancelled && (abs(e.rawX - downX) > dp(10) || abs(e.rawY - downY) > dp(10))) {
+                        cancelled = true            // moved before the hold finished: not a tap, not a drag
+                        h.removeCallbacks(longRun)
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    h.removeCallbacks(longRun)
+                    applyAlpha()
+                    if (dragging) {
+                        snap(if (e.rawX < screenWH().first / 2f) 0 else 1)
+                    } else if (!cancelled) {
+                        openPanel()
+                    }
+                    dragging = false
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    h.removeCallbacks(longRun)
+                    applyAlpha()
+                    if (dragging) snap(if (e.rawX < screenWH().first / 2f) 0 else 1)
+                    dragging = false
+                }
+            }
+            true
+        }
     }
 
     private fun attachDrag(
@@ -276,6 +349,11 @@ class FloatingService : Service() {
                     if (moved) {
                         lp.x = sx + dx
                         lp.y = sy + dy
+                        if (t !== bubble) {
+                            val d = resources.displayMetrics
+                            lp.x = lp.x.coerceIn(-(t.width - dp(70)).coerceAtLeast(0), d.widthPixels - dp(70))
+                            lp.y = lp.y.coerceIn(0, d.heightPixels - dp(50))
+                        }
                         try { wm.updateViewLayout(t, lp) } catch (ex: Exception) {}
                     }
                 }
@@ -398,7 +476,7 @@ class FloatingService : Service() {
     }
 
     private fun saveScroll() {
-        (body?.getChildAt(0) as? ScrollView)?.let { lastScrollY = it.scrollY }
+        (body?.getChildAt(0) as? ScrollView)?.let { scrollMap[filter] = it.scrollY }
     }
 
     private fun rebuildPanel() {
@@ -440,20 +518,16 @@ class FloatingService : Service() {
         minB.background = rounded(C.CARD2, 14)
         minB.setOnClickListener { closePanel() }
         head.addView(minB)
-        val fsB = ic(if (full) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen, if (full) C.ACCENT else C.TEXT)
-        fsB.background = rounded(C.CARD2, 14)
-        fsB.setOnClickListener {
-            Store.prefs.edit().putBoolean("pfull", !full).apply()
-            rebuildPanel()
-        }
-        head.addView(fsB, LP(WRAP, WRAP).apply { leftMargin = dp(4) })
-        head.addView(ic(R.drawable.ic_pin, C.AMBER))
+        val pinIc = ic(R.drawable.ic_pin, C.AMBER)
+        head.addView(pinIc)
         if (!compact) {
             val title = label("PinClip", 15f)
             title.setTypeface(title.typeface, Typeface.BOLD)
             title.maxLines = 1
             head.addView(title)
+            if (!full) attachDrag(title, { panel }, { panelLp }, null) { savePanelGeometry() }
         }
+        if (!full) attachDrag(pinIc, { panel }, { panelLp }, null) { savePanelGeometry() }
         val hScroll = HorizontalScrollView(this)
         hScroll.isHorizontalScrollBarEnabled = false
         hScroll.isFillViewport = true
@@ -524,6 +598,26 @@ class FloatingService : Service() {
             }
         }
         icons.addView(addB)
+
+        // small full-screen toggle, far right
+        val fsB = iconView(if (full) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen, if (full) C.ACCENT else C.SUB, 12, 3)
+        fsB.setOnClickListener {
+            saveScroll()
+            Store.prefs.edit().putBoolean("pfull", !full).apply()
+            rebuildPanel()
+        }
+        head.addView(fsB, LP(WRAP, WRAP).apply { leftMargin = dp(2) })
+
+        // drag handle across the whole top edge (grab anywhere here to move the window)
+        val handle = FrameLayout(this)
+        val pillV = View(this)
+        pillV.background = rounded(C.SUB, 3)
+        pillV.alpha = 0.6f
+        handle.addView(pillV, FrameLayout.LayoutParams(dp(44), dp(4), Gravity.CENTER))
+        if (!full) {
+            root.addView(handle, LP(MATCH, dp(22)))
+            attachDrag(handle, { panel }, { panelLp }, null) { savePanelGeometry() }
+        }
         root.addView(head, LP(MATCH, WRAP))
 
         // search box: hidden until the search button is tapped
@@ -616,7 +710,6 @@ class FloatingService : Service() {
         panel = root
         panelLp = lp
         wm.addView(root, lp)
-        if (!full) attachDrag(head, { panel }, { panelLp }, null) { savePanelGeometry() }
         applyPanelAlpha()
 
         renderChips()
@@ -658,7 +751,15 @@ class FloatingService : Service() {
         fun chip(text: String, key: String, g: Group?) {
             val sel = filter == key
             val t = tiny(text, if (sel) C.ACCENT else C.CARD, if (sel) Color.WHITE else C.TEXT)
-            t.setOnClickListener { filter = key; renderChips(); renderList(true) }
+            t.setOnClickListener {
+                if (filter != key) {
+                    saveScroll()
+                    filter = key
+                    if (!editorOpen) body?.removeAllViews()   // so the new tab restores ITS own saved position
+                    renderChips()
+                    renderList()
+                }
+            }
             if (g != null) t.setOnLongClickListener { groupMenu(g); true }
             row.addView(t, LP(WRAP, WRAP).apply { rightMargin = dp(6) })
         }
@@ -709,8 +810,8 @@ class FloatingService : Service() {
         updateActionRow(list)
         if (editorOpen) return
         // remember where the user was so a paste/refresh doesn't jump back to the top
-        val oldScroll = if (resetScroll) 0 else ((b.getChildAt(0) as? ScrollView)?.scrollY ?: lastScrollY)
-        lastScrollY = oldScroll
+        val oldScroll = if (resetScroll) 0 else ((b.getChildAt(0) as? ScrollView)?.scrollY ?: scrollMap[filter] ?: 0)
+        scrollMap[filter] = oldScroll
         b.removeAllViews()
         if (list.isEmpty()) {
             val e = label("Nothing here yet.\nTap + to add text, or turn on Auto detect.", 13f, C.SUB)
@@ -755,20 +856,20 @@ class FloatingService : Service() {
             val iv = ImageView(this)
             iv.adjustViewBounds = true
             iv.scaleType = ImageView.ScaleType.CENTER_CROP
-            iv.maxHeight = dp(110)
+            iv.maxHeight = if (x.id in expanded) dp(600) else dp(110)
             val tf = Store.thumb(x)
             if (tf.exists()) iv.setImageBitmap(BitmapFactory.decodeFile(tf.path))
             mid.addView(iv, LP(MATCH, WRAP))
             if (x.text.isNotBlank()) {
                 val cl = label(x.text, 12f)
-                cl.maxLines = 2
+                cl.maxLines = if (x.id in expanded) Int.MAX_VALUE else 2
                 cl.ellipsize = TextUtils.TruncateAt.END
                 cl.setPadding(0, dp(4), 0, 0)
                 mid.addView(cl)
             }
         } else {
             val t = label(x.text, if (compact) 12f else 13f)
-            if (!Store.prefs.getBoolean("reading", false)) {
+            if (!Store.prefs.getBoolean("reading", false) && x.id !in expanded) {
                 t.maxLines = 4
                 t.ellipsize = TextUtils.TruncateAt.END
             }
@@ -786,6 +887,13 @@ class FloatingService : Service() {
         right.orientation = if (compact) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
         val ia = if (compact) 14 else 16
         val ip = if (compact) 4 else 5
+        val isOpen = x.id in expanded
+        val ex = iconView(if (isOpen) R.drawable.ic_collapse else R.drawable.ic_expand, if (isOpen) C.ACCENT else C.SUB, ia, ip)
+        ex.setOnClickListener {
+            if (!expanded.add(x.id)) expanded.remove(x.id)
+            renderList()
+        }
+        right.addView(ex)
         val ed = iconView(R.drawable.ic_edit, C.SUB, ia, ip)
         ed.setOnClickListener {
             if (x.image == null) {

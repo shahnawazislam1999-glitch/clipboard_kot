@@ -111,7 +111,7 @@ class MainActivity : Activity() {
         bubbleSw = Switch(this)
         bubbleSw.setOnCheckedChangeListener { _, on -> if (!sup) onBubble(on) }
         root.addView(
-            card("Floating bubble", "A small draggable bubble that floats over every app. Tap it to open your clipboard.", switchRow("Show bubble", bubbleSw)),
+            card("Edge handle (one tap)", "Tap the colored handle on the screen edge once to open your clipboard. Press and hold it, then drag, to move it anywhere along the left or right edge.", switchRow("Show handle", bubbleSw)),
             LP(MATCH, WRAP).apply { topMargin = dp(20) }
         )
 
@@ -121,14 +121,37 @@ class MainActivity : Activity() {
         seek.max = 100
         seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                alphaLabel.text = "Bubble opacity: $p%"
-                if (fromUser) Store.prefs.edit().putInt("alpha", p).apply()
+                alphaLabel.text = "Handle opacity: $p%"
+                if (fromUser) Store.prefs.edit().putInt("halpha", p).apply()
             }
             override fun onStartTrackingTouch(s: SeekBar?) {}
             override fun onStopTrackingTouch(s: SeekBar?) {}
         })
         root.addView(
-            card("Bubble dim", "0 – 100%. Low values hide the bubble in the corner of your eye (it lights up while you drag it).", alphaLabel, seek),
+            card("Handle opacity", "0 – 100%. At 0 the handle is invisible but still tappable. It lights up while you touch it.", alphaLabel, seek),
+            LP(MATCH, WRAP).apply { topMargin = dp(12) }
+        )
+
+        // handle colour
+        val swatches = LinearLayout(this)
+        swatches.orientation = LinearLayout.HORIZONTAL
+        fun drawSwatches() {
+            swatches.removeAllViews()
+            val cur = Store.prefs.getInt("hcolor", HANDLE_COLORS[0])
+            for (c in HANDLE_COLORS) {
+                val dot = View(this)
+                val g = android.graphics.drawable.GradientDrawable()
+                g.shape = android.graphics.drawable.GradientDrawable.OVAL
+                g.setColor(c)
+                if (c == cur) g.setStroke(dp(3), android.graphics.Color.WHITE) else g.setStroke(dp(1), 0x55FFFFFF)
+                dot.background = g
+                dot.setOnClickListener { Store.prefs.edit().putInt("hcolor", c).apply(); drawSwatches() }
+                swatches.addView(dot, LP(dp(36), dp(36)).apply { rightMargin = dp(12) })
+            }
+        }
+        drawSwatches()
+        root.addView(
+            card("Handle color", "Pick a color so this handle is never confused with another app's edge handle.", swatches),
             LP(MATCH, WRAP).apply { topMargin = dp(12) }
         )
 
@@ -199,7 +222,7 @@ class MainActivity : Activity() {
         root.addView(
             card(
                 "Keep running",
-                "The bubble runs as a protected service, restarts itself after a swipe from recents, a reboot or an app update. In your phone's recents screen also lock PinClip (long-press its card → Lock). Autostart must be allowed on Xiaomi, Oppo, Vivo, Huawei.",
+                "The handle runs as a protected service, restarts itself after a swipe from recents, a reboot or an app update. In your phone's recents screen also lock PinClip (long-press its card → Lock). Autostart must be allowed on Xiaomi, Oppo, Vivo, Huawei.",
                 keepStatus, kcol
             ),
             LP(MATCH, WRAP).apply { topMargin = dp(12) }
@@ -256,10 +279,10 @@ class MainActivity : Activity() {
                 "• Use {date} and {time} in a card; they turn into today's date/time when pasted.\n" +
                 "• Long-press a group chip to rename or delete it.\n" +
                 "• Search + 'Top used' chip find your most reused snippets fast.\n" +
-                "• Notification: tap it (or its Open button) to show the clipboard window even when the bubble is hidden; Hide/Show bubble toggles the bubble.\n" +
+                "• Notification: tap it (or its Open button) to show the clipboard window even when the handle is hidden; Hide/Show handle toggles the handle.\n" +
                 "• ⇕ icon = reading mode (full text). Select mode → Select all → Move to group or Delete. Paste all pastes the whole current view, oldest first.\n" +
                 "• Drag the window by its title bar; drag the grip at the bottom-right corner to resize. Position and size are remembered.\n" +
-                "• The ▾ button at the top of the panel shrinks it back to the bubble.",
+                "• The ▾ button at the top of the panel shrinks it back to the edge handle.",
             12f, C.SUB
         )
         root.addView(
@@ -273,9 +296,9 @@ class MainActivity : Activity() {
         sup = true
         bubbleSw.isChecked = Store.prefs.getBoolean("bubble", false) && Settings.canDrawOverlays(this)
         autoSw.isChecked = Store.prefs.getBoolean("auto", false) && bubbleSw.isChecked
-        val a = Store.prefs.getInt("alpha", 10)
+        val a = Store.prefs.getInt("halpha", 40)
         seek.progress = a
-        alphaLabel.text = "Bubble opacity: $a%"
+        alphaLabel.text = "Handle opacity: $a%"
         val pa = Store.prefs.getInt("palpha", 100)
         seek2.progress = pa
         palphaLabel.text = "Window opacity: $pa%"

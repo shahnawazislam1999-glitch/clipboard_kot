@@ -61,3 +61,13 @@ fun Context.pill(t: String, bg: Int, fg: Int = C.TEXT, small: Boolean = false): 
 }
 
 fun LP(w: Int, h: Int, wt: Float = 0f) = LinearLayout.LayoutParams(w, h, wt)
+
+/** Colours the edge handle can wear, so it never gets mixed up with another app's handle. */
+val HANDLE_COLORS = intArrayOf(
+    0xFFFFB224.toInt(), // amber (default, matches the pin)
+    0xFF2ED47A.toInt(), // green
+    0xFFFF4D8D.toInt(), // pink
+    0xFF22D3EE.toInt(), // cyan
+    0xFFA855F7.toInt(), // purple
+    0xFFFF5C6C.toInt()  // red
+)
