@@ -212,7 +212,7 @@ class FloatingService : Service() {
         PixelFormat.TRANSLUCENT
     )
 
-    private fun handleW() = dp(28)
+    private fun handleW() = dp(36)
     private fun handleH() = dp(68)
     private fun handleSide() = Store.prefs.getInt("hside", 1)   // 0 = left edge, 1 = right edge
 
@@ -234,6 +234,12 @@ class FloatingService : Service() {
         applyAlpha()
         applyBubbleVis()
         attachHandleTouch(v)
+        // stop the system back-gesture from stealing touches on the screen edge (this is what blocked hold + drag)
+        if (Build.VERSION.SDK_INT >= 29) {
+            v.addOnLayoutChangeListener { view, l, t, r, b, _, _, _, _ ->
+                view.systemGestureExclusionRects = listOf(android.graphics.Rect(0, 0, r - l, b - t))
+            }
+        }
     }
 
     private fun styleHandle() {
@@ -290,7 +296,7 @@ class FloatingService : Service() {
                     downX = e.rawX; downY = e.rawY; startY = lp.y
                     dragging = false; cancelled = false
                     v.alpha = 1f
-                    h.postDelayed(longRun, 350)
+                    h.postDelayed(longRun, 300)
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (dragging) {
@@ -298,7 +304,7 @@ class FloatingService : Service() {
                         lp.y = (startY + (e.rawY - downY)).toInt().coerceIn(0, maxOf(0, sh - handleH()))
                         lp.x = (e.rawX - handleW() / 2f).toInt().coerceIn(0, maxOf(0, sw - handleW()))
                         try { wm.updateViewLayout(v, lp) } catch (ex: Exception) {}
-                    } else if (!cancelled && (abs(e.rawX - downX) > dp(10) || abs(e.rawY - downY) > dp(10))) {
+                    } else if (!cancelled && (abs(e.rawX - downX) > dp(18) || abs(e.rawY - downY) > dp(18))) {
                         cancelled = true            // moved before the hold finished: not a tap, not a drag
                         h.removeCallbacks(longRun)
                     }
